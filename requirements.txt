@@ -1,6 +1,33 @@
-faiss-cpu
-transformers
-torch
-gradio
-pypdf
-sentence-transformers 
+# Core dependencies for Ultra-Enhanced Smart Document Helper
+# Python 3.8+ required
+
+# PDF Processing
+pypdf==3.17.4
+
+# Machine Learning & NLP
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.36.0
+sentence-transformers>=2.2.2
+bitsandbytes>=0.41.0  # For 4-bit quantization
+
+# Vector Search
+faiss-cpu>=1.7.4  # Use faiss-gpu if CUDA available
+numpy>=1.24.0
+
+# Web Interface
+gradio>=4.16.0
+
+# Visualization
+plotly>=5.18.0
+
+# Optional but recommended
+accelerate>=0.25.0  # For better model loading
+scipy>=1.10.0       # For some transformers features
+pandas>=2.0.0       # For data handling
+markdown>=3.5.0     # For report conversion
+pdfkit>=1.0.0       # For PDF generation (requires wkhtmltopdf)
+
+# Development tools (optional)
+jupyter>=1.0.0
+ipywidgets>=8.0.0
