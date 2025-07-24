@@ -1,18 +1,25 @@
 # Core dependencies for Ultra-Enhanced Smart Document Helper
-# Python 3.8+ required
+# Python 3.8–3.12 required
+
+# IMPORTANT:
+# Install PyTorch and torchvision separately for your system and CUDA version.
+# For GPU (CUDA 12.1): pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# For CPU only:         pip install torch torchvision torchaudio
+# For vector search, install either faiss-cpu or faiss-gpu as appropriate:
+#   pip install faiss-cpu    # (default, works everywhere)
+#   pip install faiss-gpu    # (if you want GPU acceleration and have CUDA)
 
 # PDF Processing
 pypdf==3.17.4
 
 # Machine Learning & NLP
-torch>=2.0.0
-torchvision>=0.15.0
 transformers>=4.36.0
 sentence-transformers>=2.2.2
 bitsandbytes>=0.41.0  # For 4-bit quantization
 
 # Vector Search
-faiss-cpu>=1.7.4  # Use faiss-gpu if CUDA available
+faiss-cpu>=1.7.4  # Use this on Windows
+# faiss-gpu>=1.7.4  # Not available on Windows
 numpy>=1.24.0
 
 # Web Interface

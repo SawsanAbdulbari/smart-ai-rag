@@ -12,6 +12,8 @@ __pycache__/
 # Virtual environments
 venv/
 .venv/
+venv312/
+
 
 # VSCode settings
 .vscode/

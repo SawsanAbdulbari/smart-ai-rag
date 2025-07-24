@@ -1,0 +1,964 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# ### 🚀 Ultra-Smart AI - Multi-Strategy RAG System
+# 
+# This advanced version combines **multiple prompting strategies** for superior performance:
+# 
+# **🎯 Combined Strategies:**
+# 
+# 1. **🎭 Role-Based Prompting**: Choose from multiple AI personas
+# 2. **📚 Few-Shot Learning**: Provide examples to guide responses
+# 3. **🧠 Chain-of-Thought**: Step-by-step reasoning for complex queries
+# 4. **✏️ Prompt Editing**: Live prompt customization
+# 5. **🔄 Self-Consistency**: Multiple response generation with voting
+# 
+# **✨ Interactive Features:**
+# 
+# - **Example Library**: Pre-loaded examples for each role
+# - **Prompt Preview**: See and edit the actual prompt
+# - **Response Comparison**: Compare outputs from different strategies
+# - **Confidence Scoring**: AI self-assessment of response quality
+# - **Strategy Mixing**: Combine multiple strategies dynamically
+
+# ### 🔧 Part 0: Setup and Installations
+
+# In[1]:
+
+
+# !pip install faiss-cpu
+# !pip install gradio
+# !pip install pypdf
+# !pip install plotly  # For confidence visualization
+
+
+# ### 📦 Part 1: Import Required Libraries
+
+# In[2]:
+
+
+import os
+import re
+import torch
+import faiss
+import numpy as np
+import gradio as gr
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, BitsAndBytesConfig
+from sentence_transformers import SentenceTransformer
+from pypdf import PdfReader
+import warnings
+from typing import Dict, List, Tuple, Optional
+import json
+from dataclasses import dataclass
+from collections import Counter
+import plotly.graph_objects as go
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+print("Libraries imported successfully.")
+
+
+# ### ⚙️ Part 2: Configuration with Example Library
+
+# In[ ]:
+
+
+# --- Configuration ---
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+    print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+else:
+    device = torch.device("cpu")
+    print("Using CPU. Note: LLM inference will be significantly slower.")
+
+# --- Model Selection ---
+EMBEDDING_MODEL_NAME = 'all-MiniLM-L6-v2'
+LLM_MODEL_NAME = "google/gemma-2b-it" 
+TARGET_LANGUAGE = "Finnish"
+
+# ---  Role Definitions with Examples ---
+@dataclass
+class RoleConfig:
+    name: str
+    description: str
+    emoji: str
+    traits: str
+    few_shot_examples: List[Dict[str, str]]
+    thinking_style: str
+
+ROLES = {
+    "Teacher": RoleConfig(
+        name="Teacher",
+        description="Explains concepts clearly with examples",
+        emoji="👩‍🏫",
+        traits="patient, educational, uses analogies and examples",
+        thinking_style="Let me think about how to explain this clearly...",
+        few_shot_examples=[
+            {
+                "query": "What is machine learning?",
+                "response": "Great question! Machine learning is like teaching a computer to learn from experience, just like how you learned to ride a bike. At first, you might fall, but with practice (data), you get better. The computer looks at many examples and finds patterns, so it can make good guesses about new things it hasn't seen before!"
+            },
+            {
+                "query": "How does photosynthesis work?",
+                "response": "Think of plants as little solar-powered factories! They use sunlight like we use electricity. The leaves capture sunlight (like solar panels), mix it with water from the roots and CO2 from the air, and create food (glucose) for the plant. As a bonus, they release oxygen for us to breathe! It's nature's perfect recycling system."
+            }
+        ]
+    ),
+    "Expert Reviewer": RoleConfig(
+        name="Expert Reviewer",
+        description="Provides critical analysis and detailed evaluation",
+        emoji="🔍",
+        traits="analytical, thorough, objective, professional",
+        thinking_style="Let me analyze this systematically...",
+        few_shot_examples=[
+            {
+                "query": "Evaluate this claim: 'AI will replace all jobs'",
+                "response": "This claim requires nuanced analysis. While AI demonstrates transformative potential in automating routine tasks (data entry, basic analysis), historical precedent suggests technology creates new job categories while eliminating others. Key considerations: 1) Creative and interpersonal roles remain human-dominant, 2) AI augmentation vs. replacement paradigm, 3) Reskilling timeframes. The claim oversimplifies a complex socioeconomic transition."
+            },
+            {
+                "query": "What are the limitations of this study?",
+                "response": "Several methodological concerns warrant attention: 1) Sample size (n=50) limits generalizability, 2) Self-reported data introduces response bias, 3) Lack of control group prevents causal inference, 4) Two-month duration insufficient for long-term effects. Additionally, demographic homogeneity (urban, 25-35 age range) restricts external validity. Recommend replication with larger, diverse cohorts."
+            }
+        ]
+    ),
+    "Technical Writer": RoleConfig(
+        name="Technical Writer",
+        description="Structured and precise documentation-style responses",
+        emoji="💻",
+        traits="structured, clear, technical, uses bullet points and sections",
+        thinking_style="Let me structure this information clearly...",
+        few_shot_examples=[
+            {
+                "query": "How to set up a web server?",
+                "response": "## Web Server Setup Guide\n\n### Prerequisites\n- Operating System: Linux/Windows/macOS\n- Root/Admin access\n- Port 80/443 available\n\n### Steps\n1. **Install Web Server Software**\n   ```bash\n   sudo apt-get install apache2  # For Apache\n   sudo apt-get install nginx     # For Nginx\n   ```\n\n2. **Configure Firewall**\n   - Allow HTTP (port 80)\n   - Allow HTTPS (port 443)\n\n3. **Start Service**\n   ```bash\n   sudo systemctl start apache2\n   sudo systemctl enable apache2\n   ```"
+            }
+        ]
+    )
+}
+
+# --- Prompting Strategies ---
+STRATEGIES = {
+    "standard": "Standard prompting without improvements",
+    "few_shot": "Include examples to guide the response",
+    "chain_of_thought": "Step-by-step reasoning process",
+    "combined": "All strategies combined for maximum effectiveness"
+}
+
+# --- Global Variables ---
+embedder = None
+text_generator = None
+tokenizer = None
+
+
+# ### 🔑 Part 3: Authenticate with Hugging Face Hub
+
+# In[4]:
+
+
+get_ipython().system('huggingface-cli login')
+
+
+# ### 🤖 Part 4: Load Models
+
+# In[ ]:
+
+
+def load_models():
+    """Loads the embedding and language models."""
+    global embedder, text_generator, tokenizer
+
+    print(f"Loading embedding model: {EMBEDDING_MODEL_NAME}...")
+    try:
+        embedder = SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
+        print("Embedding model loaded successfully.")
+    except Exception as e:
+        print(f"Error loading embedding model: {e}")
+        raise
+
+    print(f"Loading LLM: {LLM_MODEL_NAME}...")
+    try:
+        use_4bit = True 
+        bnb_config = None
+        if use_4bit and torch.cuda.is_available():
+            try:
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_use_double_quant=False,
+                )
+                print("Using 4-bit quantization.")
+            except Exception as e:
+                print(f"Could not set up 4-bit quantization: {e}")
+                bnb_config = None
+
+        tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME)
+
+        if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+             model_dtype = torch.bfloat16
+        else:
+             model_dtype = torch.float16
+
+        model = AutoModelForCausalLM.from_pretrained(
+            LLM_MODEL_NAME,
+            device_map="auto",
+            torch_dtype=model_dtype,
+            quantization_config=bnb_config,
+            trust_remote_code=True
+        )
+        print("LLM loaded successfully.")
+
+        text_generator = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            max_new_tokens=500,  # Increased for complex strategies
+            temperature=0.7,
+            top_p=0.9,
+            do_sample=True,
+            framework="pt"
+        )
+        print("Text generation pipeline ready.")
+
+    except Exception as e:
+        print(f"Error loading LLM: {e}")
+        raise
+
+# Load models
+try:
+    load_models()
+except Exception as e:
+    print(f"Failed to load models. Error: {e}")
+
+
+# ### 📄 Part 5: Document Processing (Same as before)
+
+# In[ ]:
+
+
+def load_and_chunk_pdf(file_path, chunk_size=700, chunk_overlap=70):
+    """Loads text from a PDF file and chunks it."""
+    if not file_path or not os.path.exists(file_path):
+        print(f"Error: PDF file not found at {file_path}")
+        return None
+    try:
+        print(f"Loading PDF: {file_path}")
+        reader = PdfReader(file_path)
+        text = ""
+        for i, page in enumerate(reader.pages):
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+
+        if not text:
+            print("Error: No text extracted from the PDF.")
+            return None
+
+        text = re.sub(r'\n\s*\n', '\n', text).strip()
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        chunks = []
+        start_index = 0
+        while start_index < len(text):
+            end_index = start_index + chunk_size
+            chunks.append(text[start_index:end_index])
+            start_index += chunk_size - chunk_overlap
+
+        chunks = [chunk for chunk in chunks if len(chunk.strip()) > 50]
+        print(f"Document loaded and split into {len(chunks)} chunks.")
+        return chunks
+    except Exception as e:
+        print(f"Error loading PDF: {e}")
+        return None
+
+def build_vector_store(chunks, embedder_model):
+    """Generates embeddings and builds FAISS index."""
+    if not chunks or embedder_model is None:
+        return None, None
+    try:
+        print(f"Generating embeddings for {len(chunks)} chunks...")
+        embeddings = embedder_model.encode(chunks, convert_to_tensor=False, show_progress_bar=True)
+        embeddings_np = np.array(embeddings).astype('float32')
+
+        embedding_dim = embeddings_np.shape[1]
+        index = faiss.IndexFlatL2(embedding_dim)
+        index.add(embeddings_np)
+
+        print(f"FAISS index created with {index.ntotal} vectors.")
+        return index, chunks
+    except Exception as e:
+        print(f"Error building vector store: {e}")
+        return None, None
+
+def retrieve_context(query, vector_store, embedder_model, indexed_chunks, top_k=3):
+    """Retrieves relevant chunks."""
+    if vector_store is None or embedder_model is None or indexed_chunks is None:
+        return "Error: Vector store not initialized."
+    try:
+        query_embedding = embedder_model.encode([query], convert_to_tensor=False)
+        query_embedding_np = np.array(query_embedding).astype('float32')
+
+        distances, indices = vector_store.search(query_embedding_np, top_k)
+        retrieved_chunks = [indexed_chunks[i] for i in indices[0] if 0 <= i < len(indexed_chunks)]
+
+        if not retrieved_chunks:
+            return "Could not find relevant context."
+
+        context = "\n\n---\n\n".join(retrieved_chunks)
+        return context
+    except Exception as e:
+        print(f"Error during retrieval: {e}")
+        return f"Error: {e}"
+
+
+# ### 🎯 Part 6: Multi-Strategy Prompt Generation
+
+# In[ ]:
+
+
+class PromptBuilder:
+    """Builds prompts with multiple strategies."""
+
+    @staticmethod
+    def build_qa_prompt(role: str, query: str, context: str, strategy: str, 
+                       custom_examples: Optional[List[Dict]] = None) -> str:
+        """Build a QA prompt with the selected strategy."""
+
+        role_config = ROLES[role]
+        base_instruction = f"""You are a {role} with these traits: {role_config.traits}.
+Use the following context to answer the question."""
+
+        if strategy == "standard":
+            return f"""{base_instruction}
+
+CONTEXT:
+{context}
+
+QUESTION: {query}
+
+ANSWER:"""
+
+        elif strategy == "few_shot":
+            examples = custom_examples or role_config.few_shot_examples
+            examples_text = "\n\n".join([
+                f"Example {i+1}:\nQ: {ex['query']}\nA: {ex['response']}"
+                for i, ex in enumerate(examples[:2])  # Use max 2 examples
+            ])
+
+            return f"""{base_instruction}
+
+Here are some examples of how I respond:
+
+{examples_text}
+
+Now, using the context provided:
+
+CONTEXT:
+{context}
+
+QUESTION: {query}
+
+ANSWER:"""
+
+        elif strategy == "chain_of_thought":
+            return f"""{base_instruction}
+
+I'll think through this step-by-step.
+
+CONTEXT:
+{context}
+
+QUESTION: {query}
+
+THINKING PROCESS:
+{role_config.thinking_style}
+
+Step 1: Identify the key information in the question
+Step 2: Find relevant details in the context
+Step 3: Connect the information logically
+Step 4: Formulate a clear answer
+
+ANSWER:"""
+
+        elif strategy == "combined":
+            examples = custom_examples or role_config.few_shot_examples
+            example_text = f"Example: Q: {examples[0]['query']}\nA: {examples[0]['response']}" if examples else ""
+
+            return f"""{base_instruction}
+
+{example_text}
+
+Now I'll analyze your question step-by-step:
+
+CONTEXT:
+{context}
+
+QUESTION: {query}
+
+REASONING:
+{role_config.thinking_style}
+Let me break this down:
+1. What the question is asking
+2. Key information from the context
+3. How they connect
+
+COMPLETE ANSWER:"""
+
+    @staticmethod
+    def extract_confidence(response: str) -> float:
+        """Extract confidence score from response if present."""
+        # Simple heuristic based on response characteristics
+        confidence = 0.7  # Base confidence
+
+        # Increase confidence for detailed responses
+        if len(response) > 200:
+            confidence += 0.1
+
+        # Check for uncertainty markers
+        uncertainty_phrases = ["might", "possibly", "perhaps", "unclear", "not certain"]
+        if any(phrase in response.lower() for phrase in uncertainty_phrases):
+            confidence -= 0.2
+
+        # Check for confidence markers
+        confidence_phrases = ["clearly", "definitely", "certainly", "obviously"]
+        if any(phrase in response.lower() for phrase in confidence_phrases):
+            confidence += 0.1
+
+        return max(0.1, min(1.0, confidence))  # Clamp between 0.1 and 1.0
+
+
+# ### 🔄 Part 7: Self-Consistency and Response Generation
+
+# In[ ]:
+
+
+def generate_with_self_consistency(prompt: str, generator_pipeline, num_samples: int = 3) -> Tuple[str, float, List[str]]:
+    """Generate multiple responses and select the best one."""
+
+    if num_samples == 1:
+        # Standard single generation
+        outputs = generator_pipeline(prompt)
+        response = outputs[0]['generated_text'].split("ANSWER:")[-1].strip()
+        confidence = PromptBuilder.extract_confidence(response)
+        return response, confidence, [response]
+
+    # Generate multiple responses
+    responses = []
+    for i in range(num_samples):
+        outputs = generator_pipeline(prompt, temperature=0.7 + i*0.1)  # Vary temperature
+        response = outputs[0]['generated_text'].split("ANSWER:")[-1].strip()
+        if "COMPLETE ANSWER:" in response:
+            response = response.split("COMPLETE ANSWER:")[-1].strip()
+        responses.append(response)
+
+    # Simple voting mechanism - find common themes
+    # For a more sophisticated approach, you could use semantic similarity
+    word_freq = Counter()
+    for response in responses:
+        words = response.lower().split()
+        word_freq.update(words)
+
+    # Select the response that contains the most common themes
+    best_response = responses[0]
+    best_score = 0
+
+    for response in responses:
+        score = sum(word_freq[word.lower()] for word in response.split())
+        if score > best_score:
+            best_score = score
+            best_response = response
+
+    # Calculate confidence based on consistency
+    avg_length = np.mean([len(r) for r in responses])
+    length_variance = np.var([len(r) for r in responses])
+    base_confidence = PromptBuilder.extract_confidence(best_response)
+
+    # Lower confidence if responses vary significantly
+    if length_variance > 10000:  # High variance in response lengths
+        base_confidence *= 0.8
+
+    return best_response, base_confidence, responses
+
+
+def generate_response(query: str, context: str, task: str, role: str, 
+                             strategy: str, custom_examples: Optional[List[Dict]] = None,
+                             use_self_consistency: bool = False) -> Dict:
+    """Generate response with selected strategies."""
+
+    if text_generator is None:
+        return {
+            "response": "Error: Text generator not initialized.",
+            "confidence": 0.0,
+            "prompt_used": "",
+            "all_responses": []
+        }
+
+    try:
+        # Build prompt based on task and strategy
+        if task == "Ask a question":
+            prompt = PromptBuilder.build_qa_prompt(role, query, context, strategy, custom_examples)
+        else:
+            # For now, focusing on QA. Can extend to other tasks
+            prompt = PromptBuilder.build_qa_prompt(role, query, context, strategy, custom_examples)
+
+        # Generate response(s)
+        num_samples = 3 if use_self_consistency else 1
+        response, confidence, all_responses = generate_with_self_consistency(
+            prompt, text_generator, num_samples
+        )
+
+        return {
+            "response": response,
+            "confidence": confidence,
+            "prompt_used": prompt,
+            "all_responses": all_responses
+        }
+
+    except Exception as e:
+        print(f"Error generating response: {e}")
+        return {
+            "response": f"Error: {str(e)}",
+            "confidence": 0.0,
+            "prompt_used": "",
+            "all_responses": []
+        }
+
+
+# ### 📊 Part 8: Visualization and Analysis Functions
+
+# In[ ]:
+
+
+def create_confidence_gauge(confidence: float) -> go.Figure:
+    """Create a confidence gauge visualization."""
+
+    fig = go.Figure(go.Indicator(
+        mode = "gauge+number+delta",
+        value = confidence * 100,
+        domain = {'x': [0, 1], 'y': [0, 1]},
+        title = {'text': "Response Confidence", 'font': {'size': 20}},
+        delta = {'reference': 70, 'increasing': {'color': "green"}},
+        gauge = {
+            'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
+            'bar': {'color': "darkblue"},
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "gray",
+            'steps': [
+                {'range': [0, 50], 'color': 'lightgray'},
+                {'range': [50, 80], 'color': 'gray'},
+                {'range': [80, 100], 'color': 'lightgreen'}
+            ],
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': 90
+            }
+        }
+    ))
+
+    fig.update_layout(
+        height=250,
+        margin=dict(l=20, r=20, t=40, b=20),
+        paper_bgcolor="white",
+        font={'color': "darkblue", 'family': "Arial"}
+    )
+
+    return fig
+
+
+def compare_responses(responses_dict: Dict[str, Dict]) -> str:
+    """Create a comparison of different strategy responses."""
+
+    comparison = "# 📊 Strategy Comparison\n\n"
+
+    for strategy, data in responses_dict.items():
+        comparison += f"## {strategy.replace('_', ' ').title()}\n"
+        comparison += f"**Confidence**: {data['confidence']:.2%}\n\n"
+        comparison += f"**Response**:\n> {data['response'][:200]}...\n\n"
+        comparison += "---\n\n"
+
+    return comparison
+
+
+# ### 🎮 Part 9: Interactive Gradio Interface
+
+# In[ ]:
+
+
+# Document state management
+document_state = {
+    "file_path": None,
+    "vector_store": None,
+    "indexed_chunks": None
+}
+
+# Example library management
+custom_examples = {
+    "Teacher": [],
+    "Expert Reviewer": [],
+    "Technical Writer": []
+}
+
+
+def process_document(file_obj):
+    """Process uploaded document."""
+    global document_state
+
+    if file_obj is None:
+        return "Please upload a PDF document.", ""
+
+    current_file_path = file_obj.name
+
+    if current_file_path != document_state.get("file_path"):
+        chunks = load_and_chunk_pdf(current_file_path)
+        if chunks is None:
+            return "Error: Failed to load PDF.", ""
+
+        vector_store, indexed_chunks = build_vector_store(chunks, embedder)
+        if vector_store is None:
+            return "Error: Failed to build vector store.", ""
+
+        document_state["file_path"] = current_file_path
+        document_state["vector_store"] = vector_store
+        document_state["indexed_chunks"] = indexed_chunks
+
+        preview = f"Document processed successfully!\n\n"
+        preview += f"📄 File: {os.path.basename(current_file_path)}\n"
+        preview += f"📊 Chunks: {len(chunks)}\n"
+        preview += f"📝 Preview: {chunks[0][:200]}..."
+
+        return "Document ready for analysis!", preview
+
+    return "Using previously processed document.", "Document already loaded."
+
+
+def add_custom_example(role, query, response):
+    """Add a custom example to the library."""
+    if not query or not response:
+        return "Please provide both query and response."
+
+    custom_examples[role].append({
+        "query": query,
+        "response": response
+    })
+
+    return f"Example added to {role}'s library! Total examples: {len(custom_examples[role])}"
+
+
+def preview_prompt(role, query, strategy, use_examples):
+    """Preview the prompt that will be used."""
+    if not query:
+        return "Please enter a query to preview the prompt."
+
+    # Use dummy context for preview
+    dummy_context = "[Document context will be inserted here based on your query]"
+
+    examples = custom_examples.get(role, []) if use_examples else None
+    prompt = PromptBuilder.build_qa_prompt(role, query, dummy_context, strategy, examples)
+
+    return f"```\n{prompt}\n```"
+
+
+def run_analysis(file_obj, role, query, strategy, use_self_consistency, 
+                use_custom_examples, compare_strategies):
+    """Main analysis function."""
+
+    # Check models
+    if embedder is None or text_generator is None:
+        return "Error: Models not loaded.", "", None
+
+    # Check document
+    if document_state["vector_store"] is None:
+        return "Please upload and process a document first.", "", None
+
+    if not query:
+        return "Please enter a query.", "", None
+
+    # Retrieve context
+    context = retrieve_context(
+        query, 
+        document_state["vector_store"], 
+        embedder, 
+        document_state["indexed_chunks"], 
+        top_k=6
+    )
+
+    if "Error" in context:
+        return f"Error retrieving context: {context}", "", None
+
+    # Generate response(s)
+    if compare_strategies:
+        # Compare all strategies
+        responses_dict = {}
+
+        for strat in STRATEGIES.keys():
+            result = generate_response(
+                query, context, "Ask a question", role, strat,
+                custom_examples[role] if use_custom_examples else None,
+                use_self_consistency
+            )
+            responses_dict[strat] = result
+
+        # Use the selected strategy's response as main
+        main_result = responses_dict[strategy]
+        comparison = compare_responses(responses_dict)
+
+        return main_result["response"], comparison, create_confidence_gauge(main_result["confidence"])
+
+    else:
+        # Single strategy
+        result = generate_response(
+            query, context, "Ask a question", role, strategy,
+            custom_examples[role] if use_custom_examples else None,
+            use_self_consistency
+        )
+
+        details = f"**Strategy**: {strategy}\n"
+        details += f"**Confidence**: {result['confidence']:.2%}\n"
+        if use_self_consistency and len(result['all_responses']) > 1:
+            details += f"\n**Self-Consistency**: Generated {len(result['all_responses'])} responses\n"
+
+        return result["response"], details, create_confidence_gauge(result["confidence"])
+
+
+def edit_and_regenerate(edited_prompt):
+    """Generate response from edited prompt."""
+    if not edited_prompt:
+        return "Please provide a prompt.", None
+
+    try:
+        outputs = text_generator(edited_prompt)
+        response = outputs[0]['generated_text'].split(edited_prompt)[-1].strip()
+
+        # Clean up common markers
+        for marker in ["ANSWER:", "RESPONSE:", "COMPLETE ANSWER:"]:
+            if marker in response:
+                response = response.split(marker)[-1].strip()
+
+        confidence = PromptBuilder.extract_confidence(response)
+        return response, create_confidence_gauge(confidence)
+
+    except Exception as e:
+        return f"Error: {str(e)}", None
+
+
+# ### 🚀 Part 10: Launch Ultra-Smart-AI Interface
+
+# In[ ]:
+
+
+# Create the Smart Gradio interface
+print("Building Ultra-Smart AI Interface with Multi-Strategy Support...")
+
+# Custom CSS
+custom_css = """
+.strategy-box {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    padding: 20px;
+    border-radius: 10px;
+    color: white;
+}
+.example-box {
+    background-color: #f7fafc;
+    padding: 15px;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+}
+.confidence-indicator {
+    font-size: 24px;
+    font-weight: bold;
+    text-align: center;
+}
+"""
+
+with gr.Blocks(css=custom_css, title="Ultra-Smart AI Assistant", theme=gr.themes.Soft()) as demo:
+
+    gr.Markdown(
+        """
+        # 🚀 Ultra-Smart AI Document Helper
+        ### Combining Multiple Advanced Prompting Strategies
+
+        **Features**: Role-Based Prompting + Few-Shot Learning + Chain-of-Thought + Self-Consistency + Interactive Editing
+        """
+    )
+
+    with gr.Tabs():
+        # Main Analysis Tab
+        with gr.Tab("📊 Document Analysis"):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    file_input = gr.File(label="📄 Upload PDF", file_types=[".pdf"])
+                    process_btn = gr.Button("Process Document", variant="primary")
+                    doc_status = gr.Textbox(label="Status", lines=2)
+                    doc_preview = gr.Textbox(label="Document Preview", lines=4)
+
+                    gr.Markdown("### 🎯 Configuration")
+                    role_select = gr.Dropdown(
+                        label="🎭 AI Role",
+                        choices=list(ROLES.keys()),
+                        value="Teacher"
+                    )
+
+                    strategy_select = gr.Radio(
+                        label="📚 Prompting Strategy",
+                        choices=list(STRATEGIES.keys()),
+                        value="combined",
+                        info="Select the prompting approach"
+                    )
+
+                    with gr.Row():
+                        use_self_consistency = gr.Checkbox(
+                            label="🔄 Self-Consistency",
+                            value=False,
+                            info="Generate multiple responses"
+                        )
+                        use_custom_examples = gr.Checkbox(
+                            label="📝 Use Custom Examples",
+                            value=False
+                        )
+                        compare_strategies = gr.Checkbox(
+                            label="🔍 Compare All Strategies",
+                            value=False
+                        )
+
+                with gr.Column(scale=2):
+                    query_input = gr.Textbox(
+                        label="❓ Your Question",
+                        placeholder="What would you like to know about the document?",
+                        lines=3
+                    )
+
+                    analyze_btn = gr.Button("🚀 Analyze", variant="primary", size="lg")
+
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            main_response = gr.Textbox(
+                                label="💬 AI Response",
+                                lines=15
+                            )
+                            strategy_details = gr.Markdown(label="📊 Details")
+
+                        with gr.Column(scale=1):
+                            confidence_plot = gr.Plot(label="Confidence")
+
+        # Prompt Engineering Tab
+        with gr.Tab("🔧 Prompt Engineering"):
+            gr.Markdown("### 👁️ Prompt Preview & Editing")
+
+            with gr.Row():
+                preview_role = gr.Dropdown(
+                    label="Role",
+                    choices=list(ROLES.keys()),
+                    value="Teacher"
+                )
+                preview_strategy = gr.Dropdown(
+                    label="Strategy",
+                    choices=list(STRATEGIES.keys()),
+                    value="combined"
+                )
+                preview_use_examples = gr.Checkbox(label="Include Examples", value=True)
+
+            preview_query = gr.Textbox(
+                label="Query",
+                placeholder="Enter a query to preview the prompt"
+            )
+
+            preview_btn = gr.Button("Preview Prompt")
+            prompt_preview = gr.Markdown(label="Prompt Preview")
+
+            gr.Markdown("### ✏️ Custom Prompt Editor")
+            edited_prompt = gr.Textbox(
+                label="Edit Prompt",
+                lines=10,
+                placeholder="Paste or write your custom prompt here..."
+            )
+
+            regenerate_btn = gr.Button("Generate from Custom Prompt")
+
+            with gr.Row():
+                custom_response = gr.Textbox(label="Response", lines=10)
+                custom_confidence = gr.Plot(label="Confidence")
+
+        # Example Library Tab
+        with gr.Tab("📚 Example Library"):
+            gr.Markdown("### 📝 Add Custom Examples for Few-Shot Learning")
+
+            with gr.Row():
+                example_role = gr.Dropdown(
+                    label="Role",
+                    choices=list(ROLES.keys()),
+                    value="Teacher"
+                )
+
+            example_query = gr.Textbox(
+                label="Example Query",
+                placeholder="What is quantum computing?"
+            )
+
+            example_response = gr.Textbox(
+                label="Example Response",
+                lines=5,
+                placeholder="Quantum computing is like having a magical coin..."
+            )
+
+            add_example_btn = gr.Button("Add Example")
+            example_status = gr.Textbox(label="Status")
+
+            gr.Markdown("### 📖 Current Examples")
+            for role_name in ROLES.keys():
+                with gr.Accordion(f"{ROLES[role_name].emoji} {role_name} Examples", open=False):
+                    examples_text = "\n\n".join([
+                        f"**Q**: {ex['query']}\n**A**: {ex['response']}"
+                        for ex in ROLES[role_name].few_shot_examples
+                    ])
+                    gr.Markdown(examples_text or "No examples yet.")
+
+    # Event handlers
+    process_btn.click(
+        fn=process_document,
+        inputs=[file_input],
+        outputs=[doc_status, doc_preview]
+    )
+
+    analyze_btn.click(
+        fn=run_analysis,
+        inputs=[
+            file_input, role_select, query_input, strategy_select,
+            use_self_consistency, use_custom_examples, compare_strategies
+        ],
+        outputs=[main_response, strategy_details, confidence_plot]
+    )
+
+    preview_btn.click(
+        fn=preview_prompt,
+        inputs=[preview_role, preview_query, preview_strategy, preview_use_examples],
+        outputs=[prompt_preview]
+    )
+
+    regenerate_btn.click(
+        fn=edit_and_regenerate,
+        inputs=[edited_prompt],
+        outputs=[custom_response, custom_confidence]
+    )
+
+    add_example_btn.click(
+        fn=add_custom_example,
+        inputs=[example_role, example_query, example_response],
+        outputs=[example_status]
+    )
+
+    # Footer
+    gr.Markdown(
+        """
+        ---
+        ### 🛠️ Technical Details
+        - **Strategies**: Standard, Few-Shot, Chain-of-Thought, Combined
+        - **Models**: {emb} (embeddings), {llm} (generation)
+        - **Improvement**: Multi-strategy prompting with interactive features
+        """.format(emb=EMBEDDING_MODEL_NAME, llm=LLM_MODEL_NAME)
+    )
+
+print("Launching Ultra-Smart AI Interface...")
+demo.launch(debug=False, share=True)
+
